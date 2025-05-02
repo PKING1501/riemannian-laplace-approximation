@@ -48,7 +48,21 @@ def stack_gradient2(grad, n_params):
     return grad_flat
 
 
+# def custum_hvp(f, primals, tangents, strict=False):
+#     return jvp(grad(f), primals, tangents, strict=strict)
+
 def custum_hvp(f, primals, tangents, strict=False):
+    # return jvp(grad(f), primals, tangents, strict=strict)
+    def to_floats(x):
+        if isinstance(x, torch.Tensor):
+            return x.float() if not x.is_floating_point() else x
+        elif isinstance(x, (tuple, list)):
+            return tuple(to_floats(i) for i in x)
+        else:
+            return x
+
+    primals = to_floats(primals)
+    tangents = to_floats(tangents)
     return jvp(grad(f), primals, tangents, strict=strict)
 
 

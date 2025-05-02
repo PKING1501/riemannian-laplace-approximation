@@ -84,6 +84,49 @@ def second2first_order(manifold, state, subset_of_weights):
     y = np.concatenate((cm, cmm), axis=0)
     return y
 
+# ATTEMPT 4:
+# from torchdiffeq import odeint as torch_odeint
+# import torch
+# import numpy as np
+
+# def second2first_order(manifold, state, subset_of_weights):
+#     """Convert second-order ODE to first-order system for PyTorch ODE solver."""
+#     D = state.shape[0] // 2
+    
+#     # Ensure proper dimensions and tensor type
+#     if state.ndim == 1:
+#         state = state.unsqueeze(-1)  # (2D,) -> (2D, 1)
+    
+#     # Split position and velocity
+#     c = state[:D, :]  # (D, N)
+#     cm = state[D:, :]  # (D, N)
+    
+#     # Compute acceleration using manifold geometry
+#     if subset_of_weights == 'last_layer':
+#         with torch.enable_grad():
+#             c = c.requires_grad_(True)
+#             # Ensure all manifold operations return tensors
+#             metric = manifold.metric(c)
+#             christoffel = manifold.christoffel(c)(cm, cm)
+#             prior = manifold.prior_term(c)
+            
+#             # Verify tensor types
+#             if not isinstance(metric, torch.Tensor):
+#                 metric = torch.tensor(metric, dtype=c.dtype, device=c.device)
+#             if not isinstance(christoffel, torch.Tensor):
+#                 christoffel = torch.tensor(christoffel, dtype=c.dtype, device=c.device)
+#             if not isinstance(prior, torch.Tensor):
+#                 prior = torch.tensor(prior, dtype=c.dtype, device=c.device)
+                
+#             cmm = -torch.linalg.solve(metric, christoffel + prior)
+#     else:
+#         with torch.enable_grad():
+#             c = c.requires_grad_(True)
+#             cmm = manifold.geodesic_system(c, cm)
+#             if not isinstance(cmm, torch.Tensor):
+#                 cmm = torch.tensor(cmm, dtype=c.dtype, device=c.device)
+    
+#     return torch.cat([cm, cmm], dim=0)
 
 # If the solver failed provide the linear distance as the solution
 def evaluate_failed_solution(p0, p1, t):
@@ -219,3 +262,231 @@ def new_solve_expmap(manifold, x, v, ode_fun, subset_of_weights):
     
     return curve, failed
 
+
+# # ATTEMPT 4:
+# def new_solve_expmap(manifold, x, v, ode_fun, subset_of_weights):
+#     """Optimized exponential map solver with full PyTorch compatibility."""
+#     device = x.device if isinstance(x, torch.Tensor) else 'cpu'
+#     dtype = x.dtype if isinstance(x, torch.Tensor) else torch.float32
+    
+#     # Convert and validate inputs
+#     x = x if isinstance(x, torch.Tensor) else torch.from_numpy(np.asarray(x))
+#     v = v if isinstance(v, torch.Tensor) else torch.from_numpy(np.asarray(v))
+#     x = x.reshape(-1).to(device=device, dtype=dtype)
+#     v = v.reshape(-1).to(device=device, dtype=dtype)
+    
+#     # Combine initial state
+#     init = torch.cat([x, v])  # (2D,)
+    
+#     # Time points to evaluate at (fewer points for speed)
+#     t_eval = torch.linspace(0, 1, 5, device=device, dtype=dtype)
+    
+#     # Define the ODE function with tensor type checking
+#     def torch_ode_fun(t, y):
+#         # Ensure input is tensor
+#         if not isinstance(y, torch.Tensor):
+#             y = torch.tensor(y, device=device, dtype=dtype)
+#         return second2first_order(manifold, y, subset_of_weights)
+    
+#     try:
+#         # Solve with adaptive step size
+#         solution = torch_odeint(
+#             torch_ode_fun,
+#             init,
+#             t_eval,
+#             method='dopri5',
+#             rtol=1e-4,
+#             atol=1e-6,
+#             options={'max_num_steps': 500}
+#         ).transpose(0, 1)  # (time, dim)
+        
+#         # Create robust interpolation function
+#         def curve(tt):
+#             tt = torch.as_tensor(tt, device=device, dtype=dtype).reshape(-1)
+#             t_eval = torch.linspace(0, 1, 5, device=device, dtype=dtype)
+            
+#             # Handle edge cases
+#             if len(tt) == 0:
+#                 return torch.empty(D,0), torch.empty(D,0)
+            
+#             # Find interpolation indices
+#             idx = torch.clamp(
+#                 torch.searchsorted(t_eval, tt), 
+#                 1, len(t_eval)-1
+#             )
+            
+#             # Linear interpolation
+#             t0, t1 = t_eval[idx-1], t_eval[idx]
+#             alpha = ((tt - t0)/(t1 - t0 + 1e-10)).unsqueeze(-1)
+#             y0 = solution[idx-1]
+#             y1 = solution[idx]
+#             y_interp = y0 + alpha * (y1 - y0)
+            
+#             D = x.shape[0]
+#             return y_interp[:,:D].T, y_interp[:,D:].T
+        
+#         return curve, False
+        
+#     except Exception as e:
+#         print(f"ODE solver failed, using fallback: {str(e)}")
+#         def fallback_curve(t):
+#             return x.reshape(-1,1), v.reshape(-1,1)
+#         return fallback_curve, True
+
+
+# # ALTERNATE OPTION : 1
+# from scipy.integrate import odeint  # Often faster for non-stiff problems
+
+# def new_solve_expmap(manifold, x, v, ode_fun, subset_of_weights):
+#     D = x.shape[0]
+    
+#     if isinstance(v, torch.Tensor):
+#         v = v.cpu().numpy()
+#     if isinstance(x, torch.Tensor):
+#         x = x.cpu().numpy()
+        
+#     init = np.concatenate((x, v), axis=0).flatten()
+#     failed = False
+    
+#     # Using odeint instead of solve_ivp
+#     t_eval = np.linspace(0, 1, 10)  # Fewer evaluation points for speed
+#     solution = odeint(ode_fun, init, t_eval, tfirst=True, rtol=1e-3, atol=1e-6)
+    
+#     # Create interpolation function
+#     from scipy.interpolate import interp1d
+#     interp_func = interp1d(t_eval, solution.T, kind='cubic')
+    
+#     curve = lambda tt: (interp_func(tt)[:D].reshape(D, -1), 
+#                         interp_func(tt)[D:].reshape(D, -1))
+    
+#     return curve, failed
+
+
+
+# # ATTEMPT 2 :
+# def new_solve_expmap(manifold, x, v, ode_fun, subset_of_weights):
+#     D = x.shape[0]
+    
+#     # Convert and normalize inputs
+#     if isinstance(v, torch.Tensor):
+#         v = v.cpu().numpy()
+#     if isinstance(x, torch.Tensor):
+#         x = x.cpu().numpy()
+    
+#     # Velocity scaling
+#     max_norm = 10.0
+#     v_norm = np.linalg.norm(v)
+#     if v_norm > max_norm:
+#         v = v * (max_norm / v_norm)
+    
+#     init = np.concatenate((x, v), axis=0).flatten()
+#     t_eval = np.linspace(0, 1, 10)
+#     failed = False
+    
+#     try:
+#         # First try with BDF method
+#         from scipy.integrate import solve_ivp
+#         solution = solve_ivp(lambda t, y: ode_fun(t, y) + 1e-4*y,
+#                            [0, 1], init,
+#                            method='BDF',
+#                            t_eval=t_eval,
+#                            rtol=1e-4,
+#                            atol=1e-6)
+#         sol = solution.y.T
+#     except:
+#         # Fallback to simpler method
+#         from scipy.integrate import odeint
+#         sol = odeint(lambda y, t: ode_fun(t, y) + 1e-4*y,
+#                     init, t_eval,
+#                     tfirst=False,
+#                     rtol=1e-3,
+#                     atol=1e-5,
+#                     mxstep=5000)
+    
+#     # Linear interpolation is more stable than cubic here
+#     from scipy.interpolate import interp1d
+#     interp_func = interp1d(t_eval, sol.T, kind='linear')
+    
+#     curve = lambda tt: (interp_func(tt)[:D].reshape(D, -1), 
+#                        interp_func(tt)[D:].reshape(D, -1))
+    
+#     return curve, failed
+
+
+
+
+# # ATTEMPT 3:
+# from scipy.integrate import solve_ivp
+# import numpy as np
+# import torch
+# from scipy.interpolate import interp1d
+
+# def new_solve_expmap(manifold, x, v, ode_fun, subset_of_weights):
+#     """Optimized exponential map solver with adaptive step control and fallback mechanisms.
+    
+#     Args:
+#         manifold: The Riemannian manifold object
+#         x: Initial point (Dx1 tensor or array)
+#         v: Initial velocity (Dx1 tensor or array)
+#         ode_fun: ODE function to solve
+#         subset_of_weights: Which weights to optimize ('all' or 'last_layer')
+    
+#     Returns:
+#         curve: Interpolated solution curve
+#         failed: Boolean indicating if solver failed
+#     """
+#     # Convert inputs to numpy if they're torch tensors
+#     if isinstance(v, torch.Tensor):
+#         v = v.detach().cpu().numpy()
+#     if isinstance(x, torch.Tensor):
+#         x = x.detach().cpu().numpy()
+    
+#     D = x.shape[0]
+#     x = x.reshape(-1)
+#     v = v.reshape(-1)
+    
+#     # Adaptive velocity scaling based on manifold curvature
+#     max_attempts = 3
+#     base_norm = np.linalg.norm(v)
+#     success = False
+    
+#     for attempt in range(max_attempts):
+#         current_v = v * (0.5**attempt)  # Exponential backoff
+#         init = np.concatenate([x, current_v])
+        
+#         try:
+#             # Try with BDF method first (good for stiff problems)
+#             sol = solve_ivp(
+#                 lambda t, y: ode_fun(t, y),
+#                 [0, 1],
+#                 init,
+#                 method='BDF',
+#                 t_eval=np.linspace(0, 1, 10),
+#                 rtol=1e-4,
+#                 atol=1e-6,
+#                 max_step=0.1
+#             )
+            
+#             if sol.success:
+#                 success = True
+#                 break
+                
+#         except Exception as e:
+#             continue
+    
+#     if not success:
+#         # Final fallback to simple linear propagation
+#         sol = type('', (), {})()  # Create empty object
+#         sol.t = np.linspace(0, 1, 2)
+#         sol.y = np.column_stack([init, init])
+#         return lambda t: (x.reshape(-1, 1), v.reshape(-1, 1)), True
+    
+#     # Create efficient interpolation
+#     interp_func = interp1d(sol.t, sol.y, kind='linear', axis=1)
+    
+#     curve = lambda t: (
+#         interp_func(t)[:D].reshape(D, -1),
+#         interp_func(t)[D:].reshape(D, -1)
+#     )
+    
+#     return curve, False

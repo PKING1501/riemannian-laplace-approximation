@@ -497,8 +497,11 @@ class cross_entropy_manifold:
         x = x.to(self.device)
         y = y.to(self.device)
 
+        # Ensure y is of Long type (required by CrossEntropyLoss)
+        y = y.long()
+
         if self.type != "fc":
-            # assuming input for con
+            # assuming input for convolution
             x = x.unsqueeze(1)
 
         if self.model is None:
@@ -753,22 +756,32 @@ class linearized_cross_entropy_manifold:
             y_preds = self.fmodel_map(params, self.buffers_map, datas)
             return y_preds
 
+        # Extract input and target data
         x, y = data
         x = x.to(self.device)
         y = y.to(self.device)
 
+        # Ensure y is of Long type (required by CrossEntropyLoss)
+        y = y.long()
+
         if self.type != "fc":
+            # assuming input for convolution
             x = x.unsqueeze(1)
 
+        # Getting the parameters for the map
         params_map = get_params_structure(self.theta_MAP, param)
-        diff_weights = []
-        for i in range(len(param)):
-            diff_weights.append(param[i] - self.params_map[i])
+
+        # Compute the difference in weights
+        diff_weights = [param[i] - self.params_map[i] for i in range(len(param))]
         diff_weights = tuple(diff_weights)
+
+        # Calculate the Jacobian-vector product (JVP)
         _, jvp_value = jvp(predict, (params_map, x), (diff_weights, torch.zeros_like(x)), strict=False)
 
+        # Predicted output based on MAP and JVP
         y_pred = f_MAP + jvp_value
 
+        # CrossEntropyLoss criterion
         criterion = torch.nn.CrossEntropyLoss(reduction="sum")
 
         if self.type == "fc":
@@ -781,7 +794,6 @@ class linearized_cross_entropy_manifold:
                 return self.factor * criterion(y_pred.view(-1), y)
             else:
                 return criterion(y_pred.view(-1), y)
-
     def L2_norm(self, param):
         """
         L2 regularization. I need this separate from the loss for the gradient computation

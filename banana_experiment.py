@@ -458,7 +458,10 @@ def main(args):
             else:
                 curve, failed = geometry.expmap(manifold, map_solution.clone(), v)
             _new_weights = curve(1)[0]
+            
+            
             weights_ours[n, :] = torch.from_numpy(_new_weights.reshape(-1))
+
 
     # I can get the LA weights
     weights_LA = torch.zeros(n_posterior_samples, len(map_solution))
